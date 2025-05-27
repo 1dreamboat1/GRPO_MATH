@@ -1,6 +1,6 @@
-import os
-os.environ["HTTP_PROXY"] = "http://127.0.0.1:8899"
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:8899"
+# import os
+# os.environ["HTTP_PROXY"] = "http://127.0.0.1:8899"
+# os.environ["HTTPS_PROXY"] = "http://127.0.0.1:8899"
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 device = "cuda" # the device to load the model onto

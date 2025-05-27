@@ -49,10 +49,47 @@ DatasetDict({
 # print(ds['train'][0]['answer'])
 
 
-import requests
+# import os
+# os.environ["HTTP_PROXY"] = "http://127.0.0.1:8899"
+# os.environ["HTTPS_PROXY"] = "http://127.0.0.1:8899"
 
-try:
-    response = requests.get("https://huggingface.co", timeout=10)
-    print("连接成功")
-except Exception as e:
-    print(f"连接失败: {e}")
+
+# import requests
+
+# try:
+#     response = requests.get("https://huggingface.co", timeout=10)
+#     print("连接成功")
+# except Exception as e:
+#     print(f"连接失败: {e}")
+
+
+# # Use a pipeline as a high-level helper
+# from transformers import pipeline
+
+# pipe = pipeline("text-generation", model="Qwen/Qwen2-0.5B-Instruct",trust_remote_code=True)
+# messages = [
+#     {"role": "user", "content": "Who are you?"},
+# ]
+# response = pipe(messages)
+# print(response)
+
+
+
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
+# tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
+# pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2-0.5B-Instruct",
+    trust_remote_code=True  # 关键参数
+)
+tokenizer = AutoTokenizer.from_pretrained(
+    "Qwen/Qwen2-0.5B-Instruct",
+    trust_remote_code=True
+)
+
