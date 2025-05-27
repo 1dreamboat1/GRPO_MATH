@@ -1,10 +1,10 @@
 
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
-ds = load_dataset("gsm8k", "main")
+# ds = load_dataset("gsm8k", "main")
 
-print(ds)
+# print(ds)
 
 
 # from datasets import load_dataset
@@ -47,3 +47,12 @@ DatasetDict({
 'answer': Value(dtype='string', id=None)}
 """
 # print(ds['train'][0]['answer'])
+
+
+import requests
+
+try:
+    response = requests.get("https://huggingface.co", timeout=10)
+    print("连接成功")
+except Exception as e:
+    print(f"连接失败: {e}")
