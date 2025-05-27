@@ -63,15 +63,16 @@ DatasetDict({
 #     print(f"连接失败: {e}")
 
 
-# # Use a pipeline as a high-level helper
-# from transformers import pipeline
+# Use a pipeline as a high-level helper
+from transformers import pipeline
 
-# pipe = pipeline("text-generation", model="Qwen/Qwen2-0.5B-Instruct",trust_remote_code=True)
-# messages = [
-#     {"role": "user", "content": "Who are you?"},
-# ]
-# response = pipe(messages)
-# print(response)
+model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"
+pipe = pipeline("text-generation", model=model_path ,trust_remote_code=True)
+messages = [
+    {"role": "user", "content": "Who are you?"},
+]
+response = pipe(messages,max_new_tokens=512)
+print(response)
 
 
 
@@ -82,14 +83,29 @@ DatasetDict({
 # pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+# from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2-0.5B-Instruct",
-    trust_remote_code=True  # 关键参数
-)
-tokenizer = AutoTokenizer.from_pretrained(
-    "Qwen/Qwen2-0.5B-Instruct",
-    trust_remote_code=True
-)
+# model = AutoModelForCausalLM.from_pretrained(
+#     "Qwen/Qwen2-0.5B-Instruct",
+#     trust_remote_code=True  # 关键参数
+# )
+# tokenizer = AutoTokenizer.from_pretrained(
+#     "Qwen/Qwen2-0.5B-Instruct",
+#     trust_remote_code=True
+# )
+
+
+
+
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"  # 替换为你实际的模型路径
+
+# # 加载 tokenizer
+# tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+# # 加载模型
+# model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+
+# print("Tokenizer and model loaded successfully.")
 

@@ -5,12 +5,13 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 device = "cuda" # the device to load the model onto
 
+model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2-0.5B-Instruct",
+    model_path,
     torch_dtype="auto",
     device_map="auto"
 )
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 prompt = "Give me a short introduction to large language model."
 messages = [
