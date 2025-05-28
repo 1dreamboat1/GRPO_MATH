@@ -109,3 +109,26 @@ DatasetDict({
 
 # print("Tokenizer and model loaded successfully.")
 
+
+# zero_shot_results= {
+#     "accuracy": 0.85,
+#     "avg_partial_score": 0.75
+# }
+# few_shot_3_results = {
+#     "accuracy": 0.90,
+#     "avg_partial_score": 0.80
+# }
+# few_shot_5_results = {
+#     "accuracy": 0.95,
+#     "avg_partial_score": 0.85
+# }
+# # 汇总结果
+# print(f"\n{'='*60}")
+# print("汇总结果对比")
+# print(f"{'='*60}")
+# print(f"{'测试类型':<21} {'准确率':<16} {'部分得分':<10}")
+# print(f"{'-'*60}")
+# print(f"{'Zero-Shot':<25} {zero_shot_results['accuracy']:<20.4f} {zero_shot_results['avg_partial_score']:<20.4f}")
+# print(f"{'3-Shot':<25} {few_shot_3_results['accuracy']:<20.4f} {few_shot_3_results['avg_partial_score']:<20.4f}")
+# print(f"{'5-Shot':<25} {few_shot_5_results['accuracy']:<20.4f} {few_shot_5_results['avg_partial_score']:<20.4f}")
+def hello():print("Hello, World!")
