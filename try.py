@@ -2,7 +2,7 @@
 
 # from datasets import load_dataset
 
-# ds = load_dataset("gsm8k", "main")
+# ds = load_dataset("./gsm8k", "main")
 
 # print(ds)
 
@@ -16,7 +16,7 @@
 
 # from datasets import load_dataset
 
-# ds = load_dataset("./gsm8k", "main")  # "main" 是默认的配置名称 socratic
+# ds = load_dataset("./gsm8k", "main")  # "main" 是默认的配置名称 也可以改为"socratic"
 
 # print(ds)
 """
@@ -64,15 +64,15 @@ DatasetDict({
 
 
 # Use a pipeline as a high-level helper
-from transformers import pipeline
+# from transformers import pipeline
 
-model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"
-pipe = pipeline("text-generation", model=model_path ,trust_remote_code=True)
-messages = [
-    {"role": "user", "content": "Who are you?"},
-]
-response = pipe(messages,max_new_tokens=512)
-print(response)
+# model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"
+# pipe = pipeline("text-generation", model=model_path ,trust_remote_code=True)
+# messages = [
+#     {"role": "user", "content": "Who are you?"},
+# ]
+# response = pipe(messages,max_new_tokens=512)
+# print(response)
 
 
 

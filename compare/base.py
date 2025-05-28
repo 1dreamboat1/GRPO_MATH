@@ -23,10 +23,16 @@ text = tokenizer.apply_chat_template(
     tokenize=False,
     add_generation_prompt=True
 )
-model_inputs = tokenizer([text], return_tensors="pt").to(device)
+model_inputs = tokenizer(
+    [text], 
+    return_tensors="pt",
+    padding=True,
+    return_attention_mask=True,
+    ).to(device)
 
 generated_ids = model.generate(
     model_inputs.input_ids,
+    attention_mask=model_inputs.attention_mask,
     max_new_tokens=512
 )
 generated_ids = [
@@ -34,3 +40,4 @@ generated_ids = [
 ]
 
 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+print(response)
