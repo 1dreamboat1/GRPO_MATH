@@ -7,6 +7,10 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 import numpy as np
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+import time
 
 class GSM8KDataset:
     """GSM8K数据集类"""
@@ -62,26 +66,29 @@ class GSM8KDataset:
         """获取few-shot示例"""
         return self.get_train_samples(n_shots)
 
-class QwenModel:
-    """Qwen模型类 - 批量处理优化版本"""
+class ThreadSafeQwenModel:
+    """线程安全的Qwen模型类"""
     
-    def __init__(self, model_path: str = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"):
+    def __init__(self, model_path: str = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B", num_threads: int = 4):
         """
         初始化模型
         
         Args:
             model_path: 模型路径
+            num_threads: 并行线程数
         """
         self.model_path = model_path
+        self.num_threads = num_threads
         self.tokenizer = None
         self.model = None
         self.device = None
+        self._model_lock = threading.Lock()  # 模型访问锁
         self._load_model()
         
     def _load_model(self):
         """加载模型和分词器"""
         print("正在加载模型和分词器...")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True,padding_side='left')
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
         
         # 设置pad_token
         if self.tokenizer.pad_token is None:
@@ -96,34 +103,19 @@ class QwenModel:
         self.device = next(self.model.parameters()).device
         print(f"模型已加载到设备: {self.device}")
         
-    def generate_batch_responses(self, prompts: List[str], max_length: int = 512, 
-                               temperature: float = 0.1, batch_size: int = 8) -> List[str]:
+    def generate_response_safe(self, prompt: str, max_length: int = 512, temperature: float = 0.1) -> str:
         """
-        批量生成模型响应 - 核心优化点
+        线程安全的单个响应生成
         
         Args:
-            prompts: 输入提示列表
+            prompt: 输入提示
             max_length: 最大生成长度
             temperature: 温度参数
-            batch_size: 批处理大小
         """
-        all_responses = []
-        
-        # 分批处理
-        for i in tqdm(range(0, len(prompts), batch_size)):
-            batch_prompts = prompts[i:i + batch_size]
-            
-            # 批量编码
-            inputs = self.tokenizer(
-                batch_prompts, 
-                return_tensors="pt", 
-                padding=True, 
-                truncation=True,
-                max_length=2048  # 限制输入长度防止显存不足
-            ).to(self.device)
+        with self._model_lock:  # 确保模型访问的线程安全
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(self.device)
             
             with torch.no_grad():
-                # 批量生成
                 outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=max_length,
@@ -131,32 +123,56 @@ class QwenModel:
                     do_sample=True,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
-                    # 关键优化参数
-                    use_cache=True,  # 使用缓存加速
-                    num_beams=1,     # 使用贪婪解码加速
+                    use_cache=True,
+                    num_beams=1,
                 )
             
-            # 解码响应
-            batch_responses = []
-            for j, output in enumerate(outputs):
-                response = self.tokenizer.decode(output, skip_special_tokens=True)
-                # 移除输入提示部分
-                original_prompt = batch_prompts[j]
-                if response.startswith(original_prompt):
-                    response = response[len(original_prompt):].strip()
-                batch_responses.append(response)
-            
-            all_responses.extend(batch_responses)
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # 移除输入提示部分
+            if response.startswith(prompt):
+                response = response[len(prompt):].strip()
             
             # 清理显存
             del inputs, outputs
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
-        return all_responses
+            return response
     
-    def generate_response(self, prompt: str, max_length: int = 512, temperature: float = 0.1) -> str:
-        """单个响应生成（保持向后兼容）"""
-        return self.generate_batch_responses([prompt], max_length, temperature, batch_size=1)[0]
+    def generate_responses_parallel(self, prompts: List[str], max_length: int = 512, 
+                                  temperature: float = 0.1) -> List[str]:
+        """
+        并行生成响应
+        
+        Args:
+            prompts: 输入提示列表
+            max_length: 最大生成长度
+            temperature: 温度参数
+        """
+        responses = [None] * len(prompts)
+        
+        def process_prompt(idx_prompt_pair):
+            idx, prompt = idx_prompt_pair
+            try:
+                response = self.generate_response_safe(prompt, max_length, temperature)
+                return idx, response
+            except Exception as e:
+                print(f"处理提示 {idx} 时出错: {e}")
+                return idx, ""
+        
+        # 使用线程池并行处理
+        with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+            # 提交所有任务
+            future_to_idx = {
+                executor.submit(process_prompt, (i, prompt)): i 
+                for i, prompt in enumerate(prompts)
+            }
+            
+            # 收集结果
+            for future in tqdm(as_completed(future_to_idx), total=len(prompts), desc="并行生成响应"):
+                idx, response = future.result()
+                responses[idx] = response
+        
+        return responses
     
     def create_zero_shot_prompt(self, question: str) -> str:
         """创建Zero-Shot提示"""
@@ -181,10 +197,10 @@ Answer:"""
         
         return prompt
 
-class Tester:
-    """测试类 - 批量处理优化版本"""
+class MultiThreadTester:
+    """多线程测试类"""
     
-    def __init__(self, dataset: GSM8KDataset, model: QwenModel):
+    def __init__(self, dataset: GSM8KDataset, model: ThreadSafeQwenModel):
         """
         初始化测试器
         
@@ -273,52 +289,79 @@ class Tester:
         
         return correct_steps / total_steps if total_steps > 0 else 0.0
     
-    def run_zero_shot_test(self, sample_size: int = 1319, batch_size: int = 16) -> Dict:
-        """运行Zero-Shot测试 - 批量优化版本"""
-        print(f"开始Zero-Shot测试 (批量大小: {batch_size})...")
+    def process_results_parallel(self, test_data: List[Dict], responses: List[str]) -> Tuple[List[Dict], List[Dict]]:
+        """并行处理结果"""
+        results = []
+        details = []
+        
+        def process_single_result(idx_data_response):
+            idx, (item, response) = idx_data_response
+            question = item['question']
+            ground_truth_answer = self.extract_answer(item['answer'])
+            
+            predicted_answer = self.extract_answer(response)
+            predicted_steps = self.extract_reasoning_steps(response)
+            partial_score = self.evaluate_partial_credit(predicted_steps, item['answer'])
+            
+            is_correct = (predicted_answer is not None and 
+                         ground_truth_answer is not None and 
+                         abs(predicted_answer - ground_truth_answer) < 0.01)
+            
+            result = {
+                'correct': is_correct,
+                'partial_score': partial_score
+            }
+            
+            detail = {
+                'question': question,
+                'ground_truth': ground_truth_answer,
+                'predicted': predicted_answer,
+                'correct': is_correct,
+                'partial_score': partial_score,
+                'response': response
+            }
+            
+            return idx, result, detail
+        
+        # 并行处理结果
+        indexed_results = [None] * len(test_data)
+        indexed_details = [None] * len(test_data)
+        
+        with ThreadPoolExecutor(max_workers=self.model.num_threads) as executor:
+            future_to_idx = {
+                executor.submit(process_single_result, (i, (item, response))): i 
+                for i, (item, response) in enumerate(zip(test_data, responses))
+            }
+            
+            for future in tqdm(as_completed(future_to_idx), total=len(test_data), desc="处理结果"):
+                idx, result, detail = future.result()
+                indexed_results[idx] = result
+                indexed_details[idx] = detail
+        
+        return indexed_results, indexed_details
+    
+    def run_zero_shot_test(self, sample_size: int = 1319) -> Dict:
+        """运行Zero-Shot测试 - 多线程版本"""
+        print(f"开始Zero-Shot测试 (并行线程数: {self.model.num_threads})...")
         test_data = self.dataset.get_test_samples(sample_size)
         
-        # 批量创建提示
+        # 创建提示
+        print("创建提示...")
         prompts = []
         for item in test_data:
             prompt = self.model.create_zero_shot_prompt(item['question'])
             prompts.append(prompt)
         
-        # 批量生成响应
-        print("正在批量生成响应...")
-        responses = self.model.generate_batch_responses(prompts, batch_size=batch_size)
+        # 并行生成响应
+        print("并行生成响应...")
+        start_time = time.time()
+        responses = self.model.generate_responses_parallel(prompts)
+        generation_time = time.time() - start_time
+        print(f"生成完成，耗时: {generation_time:.2f}秒")
         
-        # 处理结果
-        results = []
-        details = []
-        
-        print("正在处理结果...")
-        for i, (item, response) in enumerate(tqdm(zip(test_data, responses), total=len(test_data))):
-            question = item['question']
-            ground_truth_answer = self.extract_answer(item['answer'])
-            
-            predicted_answer = self.extract_answer(response)
-            predicted_steps = self.extract_reasoning_steps(response)
-            partial_score = self.evaluate_partial_credit(predicted_steps, item['answer'])
-            
-            is_correct = (predicted_answer is not None and 
-                         ground_truth_answer is not None and 
-                         abs(predicted_answer - ground_truth_answer) < 0.01)
-            
-            result = {
-                'correct': is_correct,
-                'partial_score': partial_score
-            }
-            results.append(result)
-            
-            details.append({
-                'question': question,
-                'ground_truth': ground_truth_answer,
-                'predicted': predicted_answer,
-                'correct': is_correct,
-                'partial_score': partial_score,
-                'response': response
-            })
+        # 并行处理结果
+        print("并行处理结果...")
+        results, details = self.process_results_parallel(test_data, responses)
         
         accuracy = self.calculate_accuracy(results)
         avg_partial_score = np.mean([r['partial_score'] for r in results])
@@ -328,57 +371,34 @@ class Tester:
             'avg_partial_score': avg_partial_score,
             'total': len(results),
             'correct': sum(1 for r in results if r['correct']),
-            'details': details
+            'details': details,
+            'generation_time': generation_time
         }
     
-    def run_few_shot_test(self, n_shots: int = 3, sample_size: int = 1319, batch_size: int = 16) -> Dict:
-        """运行Few-Shot测试 - 批量优化版本"""
-        print(f"开始Few-Shot测试 (n_shots={n_shots}, 批量大小: {batch_size})...")
+    def run_few_shot_test(self, n_shots: int = 3, sample_size: int = 1319) -> Dict:
+        """运行Few-Shot测试 - 多线程版本"""
+        print(f"开始Few-Shot测试 (n_shots={n_shots}, 并行线程数: {self.model.num_threads})...")
         
         examples = self.dataset.get_few_shot_examples(n_shots)
         test_data = self.dataset.get_test_samples(sample_size)
         
-        # 批量创建提示
+        # 创建提示
+        print("创建提示...")
         prompts = []
         for item in test_data:
             prompt = self.model.create_few_shot_prompt(item['question'], examples)
             prompts.append(prompt)
         
-        # 批量生成响应
-        print("正在批量生成响应...")
-        responses = self.model.generate_batch_responses(prompts, batch_size=batch_size)
+        # 并行生成响应
+        print("并行生成响应...")
+        start_time = time.time()
+        responses = self.model.generate_responses_parallel(prompts)
+        generation_time = time.time() - start_time
+        print(f"生成完成，耗时: {generation_time:.2f}秒")
         
-        # 处理结果
-        results = []
-        details = []
-        
-        print("正在处理结果...")
-        for i, (item, response) in enumerate(tqdm(zip(test_data, responses), total=len(test_data))):
-            question = item['question']
-            ground_truth_answer = self.extract_answer(item['answer'])
-            
-            predicted_answer = self.extract_answer(response)
-            predicted_steps = self.extract_reasoning_steps(response)
-            partial_score = self.evaluate_partial_credit(predicted_steps, item['answer'])
-            
-            is_correct = (predicted_answer is not None and 
-                         ground_truth_answer is not None and 
-                         abs(predicted_answer - ground_truth_answer) < 0.01)
-            
-            result = {
-                'correct': is_correct,
-                'partial_score': partial_score
-            }
-            results.append(result)
-            
-            details.append({
-                'question': question,
-                'ground_truth': ground_truth_answer,
-                'predicted': predicted_answer,
-                'correct': is_correct,
-                'partial_score': partial_score,
-                'response': response
-            })
+        # 并行处理结果
+        print("并行处理结果...")
+        results, details = self.process_results_parallel(test_data, responses)
         
         accuracy = self.calculate_accuracy(results)
         avg_partial_score = np.mean([r['partial_score'] for r in results])
@@ -388,7 +408,8 @@ class Tester:
             'avg_partial_score': avg_partial_score,
             'total': len(results),
             'correct': sum(1 for r in results if r['correct']),
-            'details': details
+            'details': details,
+            'generation_time': generation_time
         }
     
     def print_results(self, results: Dict, test_name: str):
@@ -398,6 +419,8 @@ class Tester:
         print(f"{'='*50}")
         print(f"准确率: {results['accuracy']:.4f} ({results['correct']}/{results['total']})")
         print(f"平均部分得分: {results['avg_partial_score']:.4f}")
+        print(f"生成耗时: {results['generation_time']:.2f}秒")
+        print(f"平均每题耗时: {results['generation_time']/results['total']:.2f}秒")
         
         # 显示一些错误案例
         print(f"\n错误案例示例:")
@@ -410,34 +433,40 @@ class Tester:
             print(f"部分得分: {case['partial_score']:.2f}")
             print(f"模型回答: {case['response'][:200]}...")
     
-    def run_comprehensive_test(self, sample_size: int = 1319, batch_size: int = 16):
-        """运行全面测试 - 批量优化版本"""
+    def run_comprehensive_test(self, sample_size: int = 1319):
+        """运行全面测试 - 多线程版本"""
+        total_start_time = time.time()
+        
         # Zero-Shot测试
-        zero_shot_results = self.run_zero_shot_test(sample_size, batch_size)
+        zero_shot_results = self.run_zero_shot_test(sample_size)
         self.print_results(zero_shot_results, "Zero-Shot")
         
         # Few-Shot测试 (3-shot)
-        few_shot_3_results = self.run_few_shot_test(n_shots=3, sample_size=sample_size, batch_size=batch_size)
+        few_shot_3_results = self.run_few_shot_test(n_shots=3, sample_size=sample_size)
         self.print_results(few_shot_3_results, "3-Shot")
         
         # Few-Shot测试 (5-shot)
-        few_shot_5_results = self.run_few_shot_test(n_shots=5, sample_size=sample_size, batch_size=batch_size)
+        few_shot_5_results = self.run_few_shot_test(n_shots=5, sample_size=sample_size)
         self.print_results(few_shot_5_results, "5-Shot")
+        
+        total_time = time.time() - total_start_time
         
         # 汇总结果
         print(f"\n{'='*60}")
         print("汇总结果对比")
         print(f"{'='*60}")
-        print(f"{'测试类型':<20} {'准确率':<10} {'部分得分':<10}")
-        print(f"{'-'*40}")
-        print(f"{'Zero-Shot':<20} {zero_shot_results['accuracy']:<10.4f} {zero_shot_results['avg_partial_score']:<10.4f}")
-        print(f"{'3-Shot':<20} {few_shot_3_results['accuracy']:<10.4f} {few_shot_3_results['avg_partial_score']:<10.4f}")
-        print(f"{'5-Shot':<20} {few_shot_5_results['accuracy']:<10.4f} {few_shot_5_results['avg_partial_score']:<10.4f}")
+        print(f"{'测试类型':<20} {'准确率':<10} {'部分得分':<10} {'耗时(秒)':<10}")
+        print(f"{'-'*50}")
+        print(f"{'Zero-Shot':<20} {zero_shot_results['accuracy']:<10.4f} {zero_shot_results['avg_partial_score']:<10.4f} {zero_shot_results['generation_time']:<10.2f}")
+        print(f"{'3-Shot':<20} {few_shot_3_results['accuracy']:<10.4f} {few_shot_3_results['avg_partial_score']:<10.4f} {few_shot_3_results['generation_time']:<10.2f}")
+        print(f"{'5-Shot':<20} {few_shot_5_results['accuracy']:<10.4f} {few_shot_5_results['avg_partial_score']:<10.4f} {few_shot_5_results['generation_time']:<10.2f}")
+        print(f"\n总耗时: {total_time:.2f}秒")
         
         return {
             'zero_shot': zero_shot_results,
             'few_shot_3': few_shot_3_results,
-            'few_shot_5': few_shot_5_results
+            'few_shot_5': few_shot_5_results,
+            'total_time': total_time
         }
 
 # 使用示例
@@ -446,23 +475,29 @@ if __name__ == "__main__":
     dataset_name = "/root/autodl-tmp/GRPO_MATH/gsm8k"
     dataset = GSM8KDataset(dataset_name, "main")
     
-    # 初始化模型
+    # 初始化模型 - 设置并行线程数
+    # 建议线程数设置为2-4，避免过多线程导致显存不足
     model_path = "/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B"
-    model = QwenModel(model_path)
+    model = ThreadSafeQwenModel(model_path, num_threads=4)
     
     # 初始化测试器
-    tester = Tester(dataset, model)
+    tester = MultiThreadTester(dataset, model)
     
-    # 运行全面测试，使用批量处理
-    # 根据你的GPU显存调整batch_size，建议从8开始尝试，如果显存够用可以增加到16或32
-    results = tester.run_comprehensive_test(sample_size=128, batch_size=64)
-    #200个数据，batch_size=8，8分钟 50/200 25%
-    #96个数据，batch_size=16, 2:12 28/96 29%
-    #96个数据，batch_size=32, 1:09 36/96 37%
-    #128个数据，batch_size=64, 0:47 40/128 31%
-
+    # 运行全面测试
+    results = tester.run_comprehensive_test(sample_size=1319)
+    
     # 保存结果
-    with open("gsm8k_test_results_optimized.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    with open("gsm8k_test_results_multithread.json", "w", encoding="utf-8") as f:
+        json.dump({k: v for k, v in results.items() if k != 'details'}, f, ensure_ascii=False, indent=2)
     
-    print("\n结果已保存到 gsm8k_test_results_optimized.json")
+    print("\n结果已保存到 gsm8k_test_results_multithread.json")
+    
+    # 性能报告
+    print(f"\n{'='*60}")
+    print("性能报告")
+    print(f"{'='*60}")
+    print(f"使用线程数: {model.num_threads}")
+    print(f"测试样本数: {results['zero_shot']['total']}")
+    print(f"总耗时: {results['total_time']:.2f}秒")
+    print(f"平均每题耗时: {results['total_time']/(results['zero_shot']['total']*3):.2f}秒")
+    print("注意: 以上时间包含了3种测试方法的总时间")
