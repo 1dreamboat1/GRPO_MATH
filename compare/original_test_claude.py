@@ -415,24 +415,31 @@ class Tester:
         # Zero-Shot测试
         zero_shot_results = self.run_zero_shot_test(sample_size, batch_size)
         self.print_results(zero_shot_results, "Zero-Shot")
+        #200个数据，batch_size=8，8分钟 50/200 25%
+        #96个数据，batch_size=16, 2:12 28/96 29%
+        #96个数据，batch_size=32, 1:09 36/96 37%
+        #128个数据，batch_size=64, 0:47 40/128 31%
+        #128个数据，batch_size=32, 1:38 36/128 28%
         
         # Few-Shot测试 (3-shot)
         few_shot_3_results = self.run_few_shot_test(n_shots=3, sample_size=sample_size, batch_size=batch_size)
         self.print_results(few_shot_3_results, "3-Shot")
+        #128个数据，batch_size=32, 1:36 40/128 31%
         
         # Few-Shot测试 (5-shot)
         few_shot_5_results = self.run_few_shot_test(n_shots=5, sample_size=sample_size, batch_size=batch_size)
         self.print_results(few_shot_5_results, "5-Shot")
+        #128个数据，batch_size=32, 1:39 42/128 33%
         
         # 汇总结果
         print(f"\n{'='*60}")
         print("汇总结果对比")
         print(f"{'='*60}")
-        print(f"{'测试类型':<20} {'准确率':<10} {'部分得分':<10}")
-        print(f"{'-'*40}")
-        print(f"{'Zero-Shot':<20} {zero_shot_results['accuracy']:<10.4f} {zero_shot_results['avg_partial_score']:<10.4f}")
-        print(f"{'3-Shot':<20} {few_shot_3_results['accuracy']:<10.4f} {few_shot_3_results['avg_partial_score']:<10.4f}")
-        print(f"{'5-Shot':<20} {few_shot_5_results['accuracy']:<10.4f} {few_shot_5_results['avg_partial_score']:<10.4f}")
+        print(f"{'测试类型':<21} {'准确率':<16} {'部分得分':<10}")
+        print(f"{'-'*60}")
+        print(f"{'Zero-Shot':<25} {zero_shot_results['accuracy']:<20.4f} {zero_shot_results['avg_partial_score']:<20.4f}")
+        print(f"{'3-Shot':<25} {few_shot_3_results['accuracy']:<20.4f} {few_shot_3_results['avg_partial_score']:<20.4f}")
+        print(f"{'5-Shot':<25} {few_shot_5_results['accuracy']:<20.4f} {few_shot_5_results['avg_partial_score']:<20.4f}")
         
         return {
             'zero_shot': zero_shot_results,
@@ -455,11 +462,8 @@ if __name__ == "__main__":
     
     # 运行全面测试，使用批量处理
     # 根据你的GPU显存调整batch_size，建议从8开始尝试，如果显存够用可以增加到16或32
-    results = tester.run_comprehensive_test(sample_size=128, batch_size=64)
-    #200个数据，batch_size=8，8分钟 50/200 25%
-    #96个数据，batch_size=16, 2:12 28/96 29%
-    #96个数据，batch_size=32, 1:09 36/96 37%
-    #128个数据，batch_size=64, 0:47 40/128 31%
+    results = tester.run_comprehensive_test(sample_size=128, batch_size=32)
+
 
     # 保存结果
     with open("gsm8k_test_results_optimized.json", "w", encoding="utf-8") as f:
