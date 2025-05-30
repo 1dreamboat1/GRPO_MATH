@@ -462,7 +462,8 @@ if __name__ == "__main__":
     
     # 运行全面测试，使用批量处理
     # 根据你的GPU显存调整batch_size，建议从8开始尝试，如果显存够用可以增加到16或32
-    results = tester.run_comprehensive_test(sample_size=128, batch_size=32)
+    sample_size=1319
+    results = tester.run_comprehensive_test(sample_size=sample_size, batch_size=32)
 
 
     # 保存结果
