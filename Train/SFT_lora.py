@@ -30,17 +30,17 @@ class TrainingConfig:
     
     # 训练参数
     max_length: int = 512
-    batch_size: int = 4
+    batch_size: int = 5
     gradient_accumulation_steps: int = 2
-    num_epochs: int = 3
-    learning_rate: float = 2e-4
-    warmup_steps: int = 100
-    weight_decay: float = 0.01
+    num_epochs: int = 1
+    learning_rate: float = 4e-5
+    warmup_steps: int = 150
+    weight_decay: float = 0.005
     train_val_split_ratio: float = 0.8
     
     # LoRA参数
     lora_rank: int = 8
-    lora_alpha: int = 32
+    lora_alpha: int = 16
     lora_dropout: float = 0.1
     target_modules: List[str] = None
     
@@ -112,8 +112,8 @@ class GSM8KDataHandler:
         logger.info(f"训练集大小: {len(self.train_data)}")
         logger.info(f"测试集大小: {len(self.test_data)}")
         
-        # 数据预处理
-        processed_train_data = self._preprocess_data(self.train_data)
+        # 数据预处理 - 转换为对话格式
+        processed_train_data = self._preprocess_data_with_conversation(self.train_data)
         
         # 创建Dataset对象并划分
         full_dataset = Dataset.from_list(processed_train_data)
@@ -130,6 +130,20 @@ class GSM8KDataHandler:
         
         return train_dataset, val_dataset
     
+    def generate_conversation(self, examples):
+        """将数据转换为对话格式"""
+        questions = examples["question"] if isinstance(examples["question"], list) else [examples["question"]]
+        answers = examples["answer"] if isinstance(examples["answer"], list) else [examples["answer"]]
+        
+        conversations = []
+        for question, answer in zip(questions, answers):
+            conversations.append([
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            ])
+        
+        return {"conversations": conversations}
+    
     def get_test_samples(self, n_samples: Optional[int] = None) -> List[Dict]:
         """获取测试样本"""
         if self.test_data is None:
@@ -139,25 +153,62 @@ class GSM8KDataHandler:
             return self.test_data
         return self.test_data[:min(n_samples, len(self.test_data))]
     
-    def _preprocess_data(self, raw_data: List[Dict]) -> List[Dict]:
-        """预处理原始数据，提取答案标签"""
+    def _preprocess_data_with_conversation(self, raw_data: List[Dict]) -> List[Dict]:
+        """预处理原始数据，转换为对话格式"""
         processed_data = []
         
-        for sample in raw_data:
+        # 创建临时Dataset用于批处理
+        temp_dataset = Dataset.from_list(raw_data)
+        
+        # 应用对话转换
+        conversations_dataset = temp_dataset.map(
+            self.generate_conversation, 
+            batched=True,
+            desc="Converting to conversation format"
+        )
+        
+        # 应用chat template
+        logger.info("应用chat template...")
+        formatted_conversations = []
+        
+        for conversations in tqdm(conversations_dataset["conversations"], desc="Applying chat template"):
+            try:
+                # 应用chat template
+                formatted_text = self.tokenizer.apply_chat_template(
+                    conversations,
+                    tokenize=False,  # 不进行分词，仅应用模板
+                    add_generation_prompt=False  # 不添加生成提示
+                )
+                formatted_conversations.append(formatted_text)
+            except Exception as e:
+                logger.warning(f"应用chat template失败: {e}")
+                # 如果失败，使用原始格式
+                question = conversations[0]["content"]
+                answer = conversations[1]["content"]
+                formatted_text = f"问题: {question}\n回答: {answer}"
+                formatted_conversations.append(formatted_text)
+        
+        # 构建最终数据
+        for i, (sample, formatted_text) in enumerate(zip(raw_data, formatted_conversations)):
             # 提取最终答案数字
             answer_label = self.extract_answer_from_text(sample['answer'])
             
-            # 构造输入文本，保持CoT格式
-            input_text = f"问题: {sample['question']}\n回答: {sample['answer']}"
-            
             processed_data.append({
-                "text": input_text,
+                "text": formatted_text,
                 "answer": sample['answer'],
                 "answer_label": answer_label,
                 "question": sample['question']
             })
         
-        logger.info(f"预处理完成，样本数量: {len(processed_data)}")
+        logger.info(f"对话格式预处理完成，样本数量: {len(processed_data)}")
+        
+        # 展示前3个样本
+        logger.info("对话格式样本示例:")
+        for i in range(min(3, len(processed_data))):
+            logger.info(f"\n=== 样本 {i+1} ===")
+            logger.info(f"格式化文本:\n{processed_data[i]['text']}")
+            logger.info(f"答案标签: {processed_data[i]['answer_label']}")
+            
         return processed_data
     
     def tokenize_dataset(self, dataset: Dataset) -> Dataset:
@@ -165,7 +216,7 @@ class GSM8KDataHandler:
         logger.info("开始tokenization...")
         
         def tokenize_function(examples):
-            # 编码完整文本（问题+回答）
+            # 编码完整文本（对话格式）
             encodings = self.tokenizer(
                 examples["text"],
                 padding="max_length",
@@ -174,18 +225,11 @@ class GSM8KDataHandler:
                 return_tensors="pt"
             )
             
-            # 编码答案部分作为labels
-            answer_encodings = self.tokenizer(
-                examples["answer"],
-                padding="max_length",
-                truncation=True,
-                max_length=self.config.max_length,
-                return_tensors="pt"
-            )
+            # 对于对话格式，labels和input_ids相同
+            encodings["labels"] = encodings["input_ids"].clone()
             
-            # 设置labels，忽略padding部分
-            encodings["labels"] = answer_encodings["input_ids"].clone()
-            encodings["labels"][answer_encodings["attention_mask"] == 0] = -100
+            # 可选：只对assistant的回答部分计算loss
+            # 这里简化处理，对整个序列计算loss
             
             return encodings
         
@@ -289,6 +333,8 @@ class QwenLoRATrainer:
             bf16=self.config.use_bf16,
             dataloader_pin_memory=False,
             remove_unused_columns=False,
+            max_grad_norm=0.5,
+            optim="adamw_torch",  # 使用稳定优化器
         )
         
         self.trainer = Trainer(
@@ -362,6 +408,28 @@ class QwenLoRATrainer:
             logger.error(f"训练过程中出现错误: {e}")
             raise
     
+    def generate_single_response(self, prompt: str, max_new_tokens: int = 256, temperature: float = 0.1) -> str:
+        """生成单个响应，用于详细展示"""
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(self.model.device)
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                use_cache=True,
+                num_beams=1,
+            )
+        
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if response.startswith(prompt):
+            response = response[len(prompt):].strip()
+        
+        return response
+    
     def generate_batch_responses(self, prompts: List[str], max_new_tokens: int = 256, 
                                temperature: float = 0.1, batch_size: int = 8) -> List[str]:
         """
@@ -421,7 +489,7 @@ class QwenLoRATrainer:
         return all_responses
             
     def evaluate_on_test_set(self, sample_size: int = 100, batch_size: int = 8):
-        """在测试集上评估模型性能 - 批量优化版本"""
+        """在测试集上评估模型性能 - 批量优化版本，展示前10个详细结果"""
         logger.info(f"开始批量评估测试集 (样本数: {sample_size}, 批量大小: {batch_size})...")
         
         # 确保使用微调后的模型
@@ -438,31 +506,54 @@ class QwenLoRATrainer:
         test_samples = self.data_handler.get_test_samples(sample_size)
         logger.info(f"获取测试样本数量: {len(test_samples)}")
         
-        # 批量创建提示
+        # 创建提示（使用对话格式）
         prompts = []
         for sample in test_samples:
-            prompt = f"问题: {sample['question']}\n回答: "
+            # 使用chat template格式化测试问题
+            try:
+                conversation = [{"role": "user", "content": sample['question']}]
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=True  # 添加生成提示
+                )
+            except:
+                # 如果失败，使用简单格式
+                prompt = f"问题: {sample['question']}\n回答: "
             prompts.append(prompt)
         
-        # 批量生成响应
-        logger.info("正在批量生成响应...")
         self.model.eval()
-        responses = self.generate_batch_responses(prompts, batch_size=batch_size)
         
         # 处理结果
         results = []
         details = []
         correct = 0
         
-        logger.info("正在处理结果...")
-        for i, (sample, response) in enumerate(tqdm(zip(test_samples, responses), desc="处理结果")):
-            question = sample['question']
-            ground_truth_text = sample['answer']
-            ground_truth_answer = self.data_handler.extract_answer_from_text(ground_truth_text)
+        logger.info("=" * 80)
+        logger.info("前10个测试样本的详细推理过程:")
+        logger.info("=" * 80)
+        
+        # 先处理前10个样本，展示详细推理过程
+        for i in range(min(10, len(test_samples))):
+            sample = test_samples[i]
+            prompt = prompts[i]
+            
+            logger.info(f"\n{'='*20} 测试样本 {i+1} {'='*20}")
+            logger.info(f"问题: {sample['question']}")
+            logger.info(f"标准答案: {sample['answer']}")
+            logger.info(f"标准答案数值: {self.data_handler.extract_answer_from_text(sample['answer'])}")
+            logger.info(f"\n输入提示:\n{prompt}")
+            logger.info(f"\n模型生成过程:")
+            
+            # 单独生成这个样本的响应，展示详细过程
+            response = self.generate_single_response(prompt, max_new_tokens=256)
+            
+            logger.info(f"模型完整响应:\n{response}")
             
             predicted_answer = self.data_handler.extract_answer_from_text(response)
+            ground_truth_answer = self.data_handler.extract_answer_from_text(sample['answer'])
             
-            # 比较答案 - 浮点数比较
+            # 比较答案
             is_correct = (predicted_answer is not None and 
                          ground_truth_answer is not None and 
                          abs(predicted_answer - ground_truth_answer) < 1e-6)
@@ -470,31 +561,63 @@ class QwenLoRATrainer:
             if is_correct:
                 correct += 1
             
-            result = {
-                'correct': is_correct,
-            }
-            results.append(result)
+            logger.info(f"\n提取的预测答案: {predicted_answer}")
+            logger.info(f"是否正确: {'✅ 正确' if is_correct else '❌ 错误'}")
             
+            results.append({'correct': is_correct})
             details.append({
-                'question': question,
+                'question': sample['question'],
                 'ground_truth': ground_truth_answer,
                 'predicted': predicted_answer,
                 'correct': is_correct,
-                'response': response
+                'response': response,
+                'prompt': prompt
             })
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("开始批量处理剩余样本...")
+        logger.info("=" * 80)
+        
+        # 批量处理剩余样本
+        if len(test_samples) > 10:
+            remaining_prompts = prompts[10:]
+            remaining_samples = test_samples[10:]
             
-            # 打印前5个样本的详细结果
-            if i < 5:
-                logger.info(f"\n=== 测试样本 {i+1} ===")
-                logger.info(f"问题: {question}")
-                logger.info(f"真实答案: {ground_truth_answer}")
-                logger.info(f"预测答案: {predicted_answer}")
-                logger.info(f"是否正确: {'✓' if is_correct else '✗'}")
+            logger.info("正在批量生成剩余响应...")
+            remaining_responses = self.generate_batch_responses(remaining_prompts, batch_size=batch_size)
+            
+            logger.info("正在处理剩余结果...")
+            for i, (sample, response) in enumerate(tqdm(zip(remaining_samples, remaining_responses), desc="处理剩余结果")):
+                question = sample['question']
+                ground_truth_text = sample['answer']
+                ground_truth_answer = self.data_handler.extract_answer_from_text(ground_truth_text)
+                
+                predicted_answer = self.data_handler.extract_answer_from_text(response)
+                
+                # 比较答案
+                is_correct = (predicted_answer is not None and 
+                             ground_truth_answer is not None and 
+                             abs(predicted_answer - ground_truth_answer) < 1e-6)
+                
+                if is_correct:
+                    correct += 1
+                
+                results.append({'correct': is_correct})
+                details.append({
+                    'question': question,
+                    'ground_truth': ground_truth_answer,
+                    'predicted': predicted_answer,
+                    'correct': is_correct,
+                    'response': response,
+                    'prompt': prompts[10 + i]
+                })
         
         total = len(results)
         accuracy = correct / total if total > 0 else 0
         
-        logger.info(f"\n=== 批量测试集评估结果 ===")
+        logger.info(f"\n" + "=" * 80)
+        logger.info("最终评估结果")
+        logger.info("=" * 80)
         logger.info(f"总样本数: {total}")
         logger.info(f"正确预测: {correct}")
         logger.info(f"准确率: {accuracy:.3f} ({accuracy*100:.1f}%)")
@@ -515,11 +638,11 @@ class QwenLoRATrainer:
             "details": details
         }
         
-        eval_path = os.path.join(self.config.output_dir, "batch_test_evaluation_results.json")
+        eval_path = os.path.join(self.config.output_dir, "detailed_test_evaluation_results.json")
         with open(eval_path, 'w', encoding='utf-8') as f:
             json.dump(eval_results, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"评估结果已保存到: {eval_path}")
+        logger.info(f"详细评估结果已保存到: {eval_path}")
         
         return eval_results
 
@@ -554,16 +677,16 @@ def main():
     """主函数"""
     # 创建训练配置
     config = TrainingConfig(
-        model_path="/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B",
-        dataset_path="/root/autodl-tmp/GRPO_MATH/gsm8k",
-        output_dir="./lora_finetuned_qwen",
-        max_length=512,
-        batch_size=4,
-        gradient_accumulation_steps=2,
-        num_epochs=3,
-        lora_rank=8,
-        lora_alpha=32,
-        lora_dropout=0.1
+        # model_path="/root/autodl-tmp/GRPO_MATH/Qwen2_0.5B",
+        # dataset_path="/root/autodl-tmp/GRPO_MATH/gsm8k",
+        # output_dir="./lora_finetuned_qwen",
+        # max_length=512,
+        # batch_size=8,
+        # gradient_accumulation_steps=2,
+        # num_epochs=3,
+        # lora_rank=8,
+        # lora_alpha=32,
+        # lora_dropout=0.1
     )
     
     # 保存配置
@@ -584,7 +707,7 @@ def main():
         logger.info("=" * 50)
         logger.info("训练完成，开始批量测试集评估")
         logger.info("=" * 50)
-        eval_results = trainer.evaluate_on_test_set(sample_size=100, batch_size=16)
+        eval_results = trainer.evaluate_on_test_set(sample_size=100, batch_size=32)
         
         # 显示最终结果摘要
         logger.info("=" * 50)
