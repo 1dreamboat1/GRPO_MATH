@@ -30,10 +30,10 @@ class TrainingConfig:
     
     # 训练参数
     max_length: int = 512
-    batch_size: int = 5
+    batch_size: int = 4
     gradient_accumulation_steps: int = 2
-    num_epochs: int = 1
-    learning_rate: float = 4e-5
+    num_epochs: int = 3
+    learning_rate: float = 2e-5
     warmup_steps: int = 150
     weight_decay: float = 0.005
     train_val_split_ratio: float = 0.8
@@ -41,7 +41,7 @@ class TrainingConfig:
     # LoRA参数
     lora_rank: int = 8
     lora_alpha: int = 16
-    lora_dropout: float = 0.1
+    lora_dropout: float = 0.05
     target_modules: List[str] = None
     
     # 其他配置
@@ -99,11 +99,7 @@ class GSM8KDataHandler:
                 })
                 self.train_data = list(dataset['train'])
                 self.test_data = list(dataset['test'])
-            else:
-                logger.info("尝试从HuggingFace加载GSM8K...")
-                dataset = load_dataset("gsm8k", "default")
-                self.train_data = list(dataset['train'])
-                self.test_data = list(dataset['test'])
+            
                 
         except Exception as e:
             logger.error(f"加载数据集失败: {e}")
@@ -212,38 +208,142 @@ class GSM8KDataHandler:
         return processed_data
     
     def tokenize_dataset(self, dataset: Dataset) -> Dataset:
-        """对数据集进行tokenization"""
+        """对数据集进行tokenization，只对assistant回答部分计算loss"""
         logger.info("开始tokenization...")
         
         def tokenize_function(examples):
-            # 编码完整文本（对话格式）
-            encodings = self.tokenizer(
-                examples["text"],
-                padding="max_length",
-                truncation=True,
-                max_length=self.config.max_length,
-                return_tensors="pt"
-            )
-            
-            # 对于对话格式，labels和input_ids相同
-            encodings["labels"] = encodings["input_ids"].clone()
-            
-            # 可选：只对assistant的回答部分计算loss
-            # 这里简化处理，对整个序列计算loss
-            
-            return encodings
+            """对数据集进行tokenization，只对assistant回答部分计算loss"""
+            # 存储批次结果
+            batch_input_ids = []
+            batch_attention_mask = []
+            batch_labels = []
+    
+            texts = examples["text"] if isinstance(examples["text"], list) else [examples["text"]]
+    
+            for text in texts:
+                # 首先编码完整文本
+                full_encoding = self.tokenizer(
+                    text,
+                    padding=False,
+                    truncation=True,
+                    max_length=self.config.max_length,  # 确保截断到指定长度
+                    return_tensors=None
+                )
         
+                input_ids = full_encoding["input_ids"]
+                attention_mask = full_encoding["attention_mask"]
+        
+                # 创建labels，初始化为-100（忽略loss计算）
+                labels = [-100] * len(input_ids)
+        
+                # 查找assistant回答的开始位置（保持原有逻辑）
+                try:
+                    text_decoded = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+            
+                    assistant_markers = [
+                        "<|im_start|>assistant\n",
+                        "assistant\n", 
+                        "回答:",
+                        "Assistant:",
+                        "<|assistant|>",
+                    ]
+            
+                    assistant_start_idx = None
+                    for marker in assistant_markers:
+                        if marker in text:
+                            marker_pos = text.find(marker)
+                            if marker_pos != -1:
+                                content_start = marker_pos + len(marker)
+                                prefix_text = text[:content_start]
+                                prefix_tokens = self.tokenizer(
+                                    prefix_text,
+                                    padding=False,
+                                    truncation=False,
+                                    return_tensors=None
+                                )["input_ids"]
+                        
+                                assistant_start_idx = len(prefix_tokens)
+                                break
+            
+                    if assistant_start_idx is not None and assistant_start_idx < len(labels):
+                        for i in range(assistant_start_idx, len(labels)):
+                            labels[i] = input_ids[i]
+                    else:
+                        mid_point = len(labels) // 2
+                        for i in range(mid_point, len(labels)):
+                            labels[i] = input_ids[i]
+        
+                except Exception as e:
+                    logger.warning(f"定位assistant回答失败，使用默认策略: {e}")
+                    mid_point = len(labels) // 2
+                    for i in range(mid_point, len(labels)):
+                        labels[i] = input_ids[i]
+        
+                batch_input_ids.append(input_ids)
+                batch_attention_mask.append(attention_mask)
+                batch_labels.append(labels)
+    
+            # 关键修复：强制padding到max_length
+            target_length = self.config.max_length
+    
+            for i in range(len(batch_input_ids)):
+                current_length = len(batch_input_ids[i])
+        
+                if current_length < target_length:
+                    # Padding到目标长度
+                    pad_length = target_length - current_length
+                    batch_input_ids[i] = batch_input_ids[i] + [self.tokenizer.pad_token_id] * pad_length
+                    batch_attention_mask[i] = batch_attention_mask[i] + [0] * pad_length
+                    batch_labels[i] = batch_labels[i] + [-100] * pad_length
+                elif current_length > target_length:
+                    # 截断到目标长度
+                    batch_input_ids[i] = batch_input_ids[i][:target_length]
+                    batch_attention_mask[i] = batch_attention_mask[i][:target_length]
+                    batch_labels[i] = batch_labels[i][:target_length]
+    
+            return {
+                "input_ids": batch_input_ids,
+                "attention_mask": batch_attention_mask,
+                "labels": batch_labels
+            }
         # 应用tokenization
         tokenized_dataset = dataset.map(
             tokenize_function, 
             batched=True, 
             num_proc=1,
-            desc="Tokenizing dataset"
+            desc="Tokenizing dataset with proper loss masking"
         )
         
         # 移除原始文本列并设置格式
         tokenized_dataset = tokenized_dataset.remove_columns([col for col in dataset.column_names if col not in ["input_ids", "attention_mask", "labels"]])
         tokenized_dataset.set_format("torch")
+        
+        # 验证tokenization结果
+        logger.info("验证tokenization结果...")
+        sample = tokenized_dataset[0]
+        labels = sample["labels"]
+        
+        # 统计有效label的数量（不是-100的）
+        valid_labels = sum(1 for label in labels if label != -100)
+        total_labels = len(labels)
+        
+        logger.info(f"样本标签统计: 有效标签 {valid_labels}/{total_labels} ({100*valid_labels/total_labels:.1f}%)")
+        
+        # 显示一个样本的详细信息（用于调试）
+        input_ids = sample["input_ids"]
+        logger.info("tokenization样本检查:")
+        logger.info(f"输入序列长度: {len(input_ids)}")
+        logger.info(f"标签序列长度: {len(labels)}")
+        
+        # 显示哪些部分会参与loss计算
+        valid_positions = [i for i, label in enumerate(labels) if label != -100]
+        if valid_positions:
+            logger.info(f"参与loss计算的位置范围: {valid_positions[0]} 到 {valid_positions[-1]}")
+            
+            # 解码参与loss计算的部分
+            valid_tokens = [input_ids[i] for i in valid_positions]
+            decoded_valid = self.tokenizer.decode(valid_tokens, skip_special_tokens=True)
+            logger.info(f"参与loss计算的文本: {decoded_valid[:200]}...")
         
         return tokenized_dataset
 
@@ -324,8 +424,11 @@ class QwenLoRATrainer:
             weight_decay=self.config.weight_decay,
             logging_dir=os.path.join(self.config.output_dir, "logs"),
             logging_steps=self.config.logging_steps,
-            evaluation_strategy="epoch",
-            save_strategy="epoch",
+            # evaluation_strategy="epoch",
+            evaluation_strategy="steps",
+            # save_strategy="epoch",
+            save_strategy="steps",
+            eval_steps=100,  # 每100步评估一次
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
@@ -511,7 +614,9 @@ class QwenLoRATrainer:
         for sample in test_samples:
             # 使用chat template格式化测试问题
             try:
-                conversation = [{"role": "user", "content": sample['question']}]
+                conversation = [
+                    {"role": "user", "content": "Please solve this math problem step by step and provide your final answer after the \"####\" marker.\n"+sample['question']},
+                ]
                 prompt = self.tokenizer.apply_chat_template(
                     conversation,
                     tokenize=False,
@@ -519,7 +624,7 @@ class QwenLoRATrainer:
                 )
             except:
                 # 如果失败，使用简单格式
-                prompt = f"问题: {sample['question']}\n回答: "
+                prompt = f"Please solve this math problem step by step and provide your final answer after the \"####\" marker.\nquestion: {sample['question']}\nanswer: "
             prompts.append(prompt)
         
         self.model.eval()
@@ -707,7 +812,7 @@ def main():
         logger.info("=" * 50)
         logger.info("训练完成，开始批量测试集评估")
         logger.info("=" * 50)
-        eval_results = trainer.evaluate_on_test_set(sample_size=100, batch_size=32)
+        eval_results = trainer.evaluate_on_test_set(sample_size=200, batch_size=32)
         
         # 显示最终结果摘要
         logger.info("=" * 50)
