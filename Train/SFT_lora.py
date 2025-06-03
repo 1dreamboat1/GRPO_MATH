@@ -29,13 +29,13 @@ class TrainingConfig:
     output_dir: str = "./lora_finetuned_qwen"
     
     # 训练参数
-    max_length: int = 512
+    max_length: int = 256
     batch_size: int = 4
     gradient_accumulation_steps: int = 2
-    num_epochs: int = 3
+    num_epochs: int = 2
     learning_rate: float = 2e-5
     warmup_steps: int = 150
-    weight_decay: float = 0.005
+    weight_decay: float = 0.01
     train_val_split_ratio: float = 0.8
     
     # LoRA参数
@@ -134,7 +134,7 @@ class GSM8KDataHandler:
         conversations = []
         for question, answer in zip(questions, answers):
             conversations.append([
-                {"role": "user", "content": question},
+                {"role": "user", "content": "Please solve this math problem step by step and provide your final answer after the \"####\" marker.\n"+question},
                 {"role": "assistant", "content": answer},
             ])
         
@@ -173,7 +173,7 @@ class GSM8KDataHandler:
                 formatted_text = self.tokenizer.apply_chat_template(
                     conversations,
                     tokenize=False,  # 不进行分词，仅应用模板
-                    add_generation_prompt=False  # 不添加生成提示
+                    add_generation_prompt=True  # 添加生成提示
                 )
                 formatted_conversations.append(formatted_text)
             except Exception as e:
@@ -189,6 +189,10 @@ class GSM8KDataHandler:
             # 提取最终答案数字
             answer_label = self.extract_answer_from_text(sample['answer'])
             
+            # 检查答案提取是否成功
+            if answer_label is None:
+                logger.warning(f"样本 {i} 答案数字提取失败: {sample['answer'][:100]}...")
+
             processed_data.append({
                 "text": formatted_text,
                 "answer": sample['answer'],
@@ -203,6 +207,8 @@ class GSM8KDataHandler:
         for i in range(min(3, len(processed_data))):
             logger.info(f"\n=== 样本 {i+1} ===")
             logger.info(f"格式化文本:\n{processed_data[i]['text']}")
+            logger.info(f"问题: {processed_data[i]['question']}")
+            logger.info(f"答案: {processed_data[i]['answer']}")
             logger.info(f"答案标签: {processed_data[i]['answer_label']}")
             
         return processed_data
@@ -239,6 +245,7 @@ class GSM8KDataHandler:
                 # 查找assistant回答的开始位置（保持原有逻辑）
                 try:
                     text_decoded = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+                    # logger.info(f"解码后的文本: {text_decoded}")  
             
                     assistant_markers = [
                         "<|im_start|>assistant\n",
@@ -282,7 +289,8 @@ class GSM8KDataHandler:
                 batch_input_ids.append(input_ids)
                 batch_attention_mask.append(attention_mask)
                 batch_labels.append(labels)
-    
+
+            # logger.info(f"生成的batch_labels: {batch_labels[:2]}")
             # 关键修复：强制padding到max_length
             target_length = self.config.max_length
     
@@ -310,7 +318,7 @@ class GSM8KDataHandler:
         tokenized_dataset = dataset.map(
             tokenize_function, 
             batched=True, 
-            num_proc=1,
+            num_proc=2,
             desc="Tokenizing dataset with proper loss masking"
         )
         
@@ -332,6 +340,7 @@ class GSM8KDataHandler:
         # 显示一个样本的详细信息（用于调试）
         input_ids = sample["input_ids"]
         logger.info("tokenization样本检查:")
+        logger.info(f"原样例文本 : {self.tokenizer.decode(input_ids, skip_special_tokens=True)}")
         logger.info(f"输入序列长度: {len(input_ids)}")
         logger.info(f"标签序列长度: {len(labels)}")
         
@@ -343,7 +352,7 @@ class GSM8KDataHandler:
             # 解码参与loss计算的部分
             valid_tokens = [input_ids[i] for i in valid_positions]
             decoded_valid = self.tokenizer.decode(valid_tokens, skip_special_tokens=True)
-            logger.info(f"参与loss计算的文本: {decoded_valid[:200]}...")
+            logger.info(f"参与loss计算的文本: {decoded_valid}")
         
         return tokenized_dataset
 
@@ -428,7 +437,7 @@ class QwenLoRATrainer:
             evaluation_strategy="steps",
             # save_strategy="epoch",
             save_strategy="steps",
-            eval_steps=100,  # 每100步评估一次
+            eval_steps=500,  # 每500步评估一次
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
@@ -520,7 +529,7 @@ class QwenLoRATrainer:
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
-                do_sample=True,
+                # do_sample=True,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
                 use_cache=True,
@@ -565,12 +574,12 @@ class QwenLoRATrainer:
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
-                    do_sample=True,
+                    # do_sample=True,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
                     # 关键优化参数
                     use_cache=True,  # 使用缓存加速
-                    num_beams=1,     # 使用贪婪解码加速
+                    num_beams=1,     
                 )
             
             # 解码响应
@@ -620,7 +629,7 @@ class QwenLoRATrainer:
                 prompt = self.tokenizer.apply_chat_template(
                     conversation,
                     tokenize=False,
-                    add_generation_prompt=True  # 添加生成提示
+                    add_generation_prompt=True  #添加生成提示
                 )
             except:
                 # 如果失败，使用简单格式
@@ -639,7 +648,7 @@ class QwenLoRATrainer:
         logger.info("=" * 80)
         
         # 先处理前10个样本，展示详细推理过程
-        for i in range(min(10, len(test_samples))):
+        for i in range(min(5, len(test_samples))):
             sample = test_samples[i]
             prompt = prompts[i]
             
@@ -647,8 +656,7 @@ class QwenLoRATrainer:
             logger.info(f"问题: {sample['question']}")
             logger.info(f"标准答案: {sample['answer']}")
             logger.info(f"标准答案数值: {self.data_handler.extract_answer_from_text(sample['answer'])}")
-            logger.info(f"\n输入提示:\n{prompt}")
-            logger.info(f"\n模型生成过程:")
+            logger.info(f"输入提示:\n{prompt}")
             
             # 单独生成这个样本的响应，展示详细过程
             response = self.generate_single_response(prompt, max_new_tokens=256)
@@ -667,6 +675,7 @@ class QwenLoRATrainer:
                 correct += 1
             
             logger.info(f"\n提取的预测答案: {predicted_answer}")
+            logger.info(f"提取的标准答案: {ground_truth_answer}")
             logger.info(f"是否正确: {'✅ 正确' if is_correct else '❌ 错误'}")
             
             results.append({'correct': is_correct})

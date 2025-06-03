@@ -358,8 +358,8 @@ class Tester:
             ground_truth_answer = self.extract_answer(item['answer'])
             
             predicted_answer = self.extract_answer(response)
-            # predicted_steps = self.extract_reasoning_steps(response)
-            # partial_score = self.evaluate_partial_credit(predicted_steps, item['answer'])
+            predicted_steps = self.extract_reasoning_steps(response)
+            partial_score = self.evaluate_partial_credit(predicted_steps, item['answer'])
             
             is_correct = (predicted_answer is not None and 
                          ground_truth_answer is not None and 
@@ -367,7 +367,7 @@ class Tester:
             
             result = {
                 'correct': is_correct,
-                # 'partial_score': partial_score
+                'partial_score': partial_score
             }
             results.append(result)
             
@@ -376,16 +376,16 @@ class Tester:
                 'ground_truth': ground_truth_answer,
                 'predicted': predicted_answer,
                 'correct': is_correct,
-                # 'partial_score': partial_score,
+                'partial_score': partial_score,
                 'response': response
             })
         
         accuracy = self.calculate_accuracy(results)
-        # avg_partial_score = np.mean([r['partial_score'] for r in results])
+        avg_partial_score = np.mean([r['partial_score'] for r in results])
         
         return {
             'accuracy': accuracy,
-            # 'avg_partial_score': avg_partial_score,
+            'avg_partial_score': avg_partial_score,
             'total': len(results),
             'correct': sum(1 for r in results if r['correct']),
             'details': details
@@ -397,7 +397,7 @@ class Tester:
         print(f"{test_name} 测试结果")
         print(f"{'='*50}")
         print(f"准确率: {results['accuracy']:.4f} ({results['correct']}/{results['total']})")
-        # print(f"平均部分得分: {results['avg_partial_score']:.4f}")
+        print(f"平均部分得分: {results['avg_partial_score']:.4f}")
         
         # 显示一些错误案例
         print(f"\n错误案例示例:")
@@ -407,7 +407,7 @@ class Tester:
             print(f"问题: {case['question']}")
             print(f"正确答案: {case['ground_truth']}")
             print(f"预测答案: {case['predicted']}")
-            # print(f"部分得分: {case['partial_score']:.2f}")
+            print(f"部分得分: {case['partial_score']:.2f}")
             print(f"模型回答: {case['response'][:200]}...")
     
     def run_comprehensive_test(self, sample_size: int = 1319, batch_size: int = 16):
