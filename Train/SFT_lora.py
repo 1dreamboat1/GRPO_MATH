@@ -30,13 +30,13 @@ class TrainingConfig:
     
     # 训练参数
     max_length: int = 256
-    batch_size: int = 4
-    gradient_accumulation_steps: int = 2
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 8
     num_epochs: int = 2
     learning_rate: float = 2e-5
     warmup_steps: int = 150
     weight_decay: float = 0.01
-    train_val_split_ratio: float = 0.8
+    train_val_split_ratio: float = 0.9
     
     # LoRA参数
     lora_rank: int = 8
@@ -50,7 +50,8 @@ class TrainingConfig:
     
     def __post_init__(self):
         if self.target_modules is None:
-            self.target_modules = ["q_proj", "v_proj"]
+            # 扩展LoRA应用的模块，增加更多可训练层
+            self.target_modules = ["q_proj", "k_proj", "v_proj"]
 
 class GSM8KDataHandler:
     """GSM8K数据集处理器"""
@@ -437,7 +438,8 @@ class QwenLoRATrainer:
             evaluation_strategy="steps",
             # save_strategy="epoch",
             save_strategy="steps",
-            eval_steps=500,  # 每500步评估一次
+            eval_steps=100,  # 每200步评估一次
+            save_steps=100,  # 每200步保存一次
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
@@ -565,7 +567,7 @@ class QwenLoRATrainer:
                 return_tensors="pt", 
                 padding=True, 
                 truncation=True,
-                max_length=512  # 限制输入长度防止显存不足
+                max_length=256  # 限制输入长度防止显存不足
             ).to(self.model.device)
             
             with torch.no_grad():
@@ -601,7 +603,7 @@ class QwenLoRATrainer:
         return all_responses
             
     def evaluate_on_test_set(self, sample_size: int = 100, batch_size: int = 8):
-        """在测试集上评估模型性能 - 批量优化版本，展示前10个详细结果"""
+        """在测试集上评估模型性能 - 批量优化版本，展示前2个详细结果"""
         logger.info(f"开始批量评估测试集 (样本数: {sample_size}, 批量大小: {batch_size})...")
         
         # 确保使用微调后的模型
@@ -646,9 +648,9 @@ class QwenLoRATrainer:
         logger.info("=" * 80)
         logger.info("前10个测试样本的详细推理过程:")
         logger.info("=" * 80)
-        
-        # 先处理前10个样本，展示详细推理过程
-        for i in range(min(5, len(test_samples))):
+
+        # 先处理前2个样本，展示详细推理过程
+        for i in range(min(2, len(test_samples))):
             sample = test_samples[i]
             prompt = prompts[i]
             
@@ -674,7 +676,7 @@ class QwenLoRATrainer:
             if is_correct:
                 correct += 1
             
-            logger.info(f"\n提取的预测答案: {predicted_answer}")
+            logger.info(f"提取的预测答案: {predicted_answer}")
             logger.info(f"提取的标准答案: {ground_truth_answer}")
             logger.info(f"是否正确: {'✅ 正确' if is_correct else '❌ 错误'}")
             
@@ -693,9 +695,9 @@ class QwenLoRATrainer:
         logger.info("=" * 80)
         
         # 批量处理剩余样本
-        if len(test_samples) > 10:
-            remaining_prompts = prompts[10:]
-            remaining_samples = test_samples[10:]
+        if len(test_samples) > 2:
+            remaining_prompts = prompts[2:]
+            remaining_samples = test_samples[2:]
             
             logger.info("正在批量生成剩余响应...")
             remaining_responses = self.generate_batch_responses(remaining_prompts, batch_size=batch_size)
@@ -723,7 +725,7 @@ class QwenLoRATrainer:
                     'predicted': predicted_answer,
                     'correct': is_correct,
                     'response': response,
-                    'prompt': prompts[10 + i]
+                    'prompt': prompts[2 + i]
                 })
         
         total = len(results)
@@ -821,7 +823,7 @@ def main():
         logger.info("=" * 50)
         logger.info("训练完成，开始批量测试集评估")
         logger.info("=" * 50)
-        eval_results = trainer.evaluate_on_test_set(sample_size=200, batch_size=32)
+        eval_results = trainer.evaluate_on_test_set(sample_size=1300, batch_size=32)
         
         # 显示最终结果摘要
         logger.info("=" * 50)
